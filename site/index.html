@@ -174,6 +174,96 @@ body {
   border-radius: 2px;
 }
 
+/* Search */
+.search-wrap {
+  position: relative;
+}
+.search-wrap input {
+  width: 100%;
+  padding: 7px 10px 7px 30px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-wrap input:focus {
+  border-color: rgba(255,255,255,0.3);
+}
+.search-wrap input::placeholder {
+  color: var(--fg2);
+}
+.search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--fg2);
+  font-size: 13px;
+  line-height: 1;
+}
+.search-results {
+  position: absolute;
+  top: 100%;
+  left: 0; right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg2);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  margin-top: 4px;
+  z-index: 30;
+  display: none;
+}
+.search-results.open {
+  display: block;
+}
+.search-results .sr-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.search-results .sr-item:last-child {
+  border-bottom: none;
+}
+.search-results .sr-item:hover,
+.search-results .sr-item.active {
+  background: rgba(255,255,255,0.08);
+}
+.search-results .sr-item .sr-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-results .sr-item .sr-title mark {
+  background: none;
+  color: #fff;
+  font-weight: 600;
+}
+.search-results .sr-item .sr-score {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.search-results .sr-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--fg2);
+  text-align: center;
+}
+
 canvas#canvas {
   display: block;
   position: fixed;
@@ -232,6 +322,12 @@ canvas#canvas {
   <div>
     <h1>AI Exposure of the US Job Market</h1>
     <div class="subtitle">342 occupations &middot; area = employment &middot; color = AI exposure<br>Data from <a href="https://www.bls.gov/ooh/">BLS</a>, scored by Gemini Flash<br><a href="https://github.com/karpathy/jobs">GitHub</a></div>
+  </div>
+
+  <div class="search-wrap">
+    <span class="search-icon">⌕</span>
+    <input type="text" id="searchInput" placeholder="Search occupations…" autocomplete="off">
+    <div class="search-results" id="searchResults"></div>
   </div>
 
   <div class="stat-section">
@@ -397,6 +493,8 @@ function worstAspect(row, rowSum, side, totalArea, availableExtent) {
 let data = [];
 let rects = [];
 let hovered = null;
+let searchMatches = new Set();
+let searchHighlight = null;
 
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
@@ -467,13 +565,25 @@ function draw() {
 
     if (rw <= 0 || rh <= 0) continue;
 
-    const fillAlpha = isHovered ? 0.8 : 0.5;
+    const isSearchMatch = searchMatches.size > 0 && searchMatches.has(r.slug);
+    const isSearchHighlight = searchHighlight === r.slug;
+    const dimmed = searchMatches.size > 0 && !isSearchMatch;
+
+    const fillAlpha = dimmed ? 0.12 : (isHovered || isSearchHighlight ? 0.8 : 0.5);
     ctx.fillStyle = exposureColorCSS(r.exposure, fillAlpha);
     ctx.fillRect(rx, ry, rw, rh);
 
-    if (isHovered) {
+    if (isSearchHighlight) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(rx, ry, rw, rh);
+    } else if (isHovered) {
       ctx.strokeStyle = "#fff";
       ctx.lineWidth = 2;
+      ctx.strokeRect(rx, ry, rw, rh);
+    } else if (isSearchMatch) {
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 1.5;
       ctx.strokeRect(rx, ry, rw, rh);
     }
 
@@ -766,6 +876,148 @@ fetch("data.json")
   });
 
 window.addEventListener("resize", resize);
+
+// ── Search ──────────────────────────────────────────────────────────
+
+const searchInput = document.getElementById("searchInput");
+const searchResults = document.getElementById("searchResults");
+let searchActiveIdx = -1;
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function highlightMatch(title, query) {
+  if (!query) return escapeHtml(title);
+  const idx = title.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return escapeHtml(title);
+  const before = title.slice(0, idx);
+  const match = title.slice(idx, idx + query.length);
+  const after = title.slice(idx + query.length);
+  return escapeHtml(before) + "<mark>" + escapeHtml(match) + "</mark>" + escapeHtml(after);
+}
+
+function doSearch(query) {
+  searchActiveIdx = -1;
+  searchHighlight = null;
+
+  if (!query.trim()) {
+    searchResults.classList.remove("open");
+    searchResults.innerHTML = "";
+    searchMatches.clear();
+    draw();
+    return;
+  }
+
+  const q = query.trim().toLowerCase();
+  const matches = data.filter(d => d.title.toLowerCase().includes(q));
+  matches.sort((a, b) => {
+    const aIdx = a.title.toLowerCase().indexOf(q);
+    const bIdx = b.title.toLowerCase().indexOf(q);
+    if (aIdx !== bIdx) return aIdx - bIdx;
+    return (b.jobs || 0) - (a.jobs || 0);
+  });
+
+  searchMatches = new Set(matches.map(d => d.slug));
+
+  if (matches.length === 0) {
+    searchResults.innerHTML = '<div class="sr-empty">No occupations found</div>';
+  } else {
+    searchResults.innerHTML = matches.slice(0, 30).map((d, i) => {
+      const scoreColor = d.exposure != null ? exposureColorCSS(d.exposure, 1) : 'var(--fg2)';
+      const scoreText = d.exposure != null ? d.exposure + '/10' : '—';
+      return `<div class="sr-item" data-slug="${d.slug}" data-idx="${i}">
+        <span class="sr-title">${highlightMatch(d.title, query.trim())}</span>
+        <span class="sr-score" style="background:${exposureColorCSS(d.exposure, 0.2)};color:${scoreColor}">${scoreText}</span>
+      </div>`;
+    }).join("");
+  }
+
+  searchResults.classList.add("open");
+  draw();
+}
+
+searchInput.addEventListener("input", (e) => {
+  doSearch(e.target.value);
+});
+
+searchInput.addEventListener("keydown", (e) => {
+  const items = searchResults.querySelectorAll(".sr-item");
+  if (!items.length) return;
+
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    searchActiveIdx = Math.min(searchActiveIdx + 1, items.length - 1);
+    updateActiveItem(items);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    searchActiveIdx = Math.max(searchActiveIdx - 1, 0);
+    updateActiveItem(items);
+  } else if (e.key === "Enter" && searchActiveIdx >= 0) {
+    e.preventDefault();
+    items[searchActiveIdx].click();
+  } else if (e.key === "Escape") {
+    searchInput.blur();
+    searchResults.classList.remove("open");
+    searchMatches.clear();
+    searchHighlight = null;
+    searchInput.value = "";
+    draw();
+  }
+});
+
+function updateActiveItem(items) {
+  items.forEach(el => el.classList.remove("active"));
+  if (searchActiveIdx >= 0 && searchActiveIdx < items.length) {
+    items[searchActiveIdx].classList.add("active");
+    items[searchActiveIdx].scrollIntoView({ block: "nearest" });
+    searchHighlight = items[searchActiveIdx].dataset.slug;
+    draw();
+  }
+}
+
+searchResults.addEventListener("click", (e) => {
+  const item = e.target.closest(".sr-item");
+  if (!item) return;
+  const slug = item.dataset.slug;
+  const d = data.find(d => d.slug === slug);
+  if (!d) return;
+
+  // Clear search and highlight just this one
+  searchResults.classList.remove("open");
+  searchInput.value = d.title;
+  searchMatches = new Set([slug]);
+  searchHighlight = slug;
+  draw();
+
+  // Show tooltip at the rect position
+  const r = rects.find(r => r.slug === slug);
+  if (r) {
+    const sidebarW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-w'));
+    showTooltip(d, sidebarW + r.rx + r.rw / 2, r.ry + r.rh / 2);
+  }
+});
+
+searchInput.addEventListener("focus", () => {
+  if (searchInput.value.trim()) {
+    doSearch(searchInput.value);
+  }
+});
+
+// Close dropdown when clicking outside
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-wrap")) {
+    searchResults.classList.remove("open");
+  }
+});
+
+// Keyboard shortcut: "/" to focus search
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== searchInput) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+});
 </script>
 </body>
 </html>
